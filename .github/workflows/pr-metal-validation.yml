@@ -1,0 +1,55 @@
+name: Exact Strata PR Metal build
+on:
+  push:
+    branches: [ci/strata-pr-3625-metal]
+permissions:
+  contents: read
+jobs:
+  metal:
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: /Users/runner/work/Strata/Strata
+    steps:
+      - name: Fetch pinned source and dependencies
+        run: |
+          set -euo pipefail
+          test "$GITHUB_WORKSPACE" = /Users/runner/work/Strata/Strata
+          mkdir -p validation-logs tmp
+          export TMPDIR="$GITHUB_WORKSPACE/tmp"
+          git init candidate
+          git -C candidate fetch --depth=1 https://github.com/HeimEndyd/Strata.git 18aa617c3fd5ea678d7fc0313deefa1718969f17
+          git -C candidate checkout --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = 18aa617c3fd5ea678d7fc0313deefa1718969f17
+          git init ggml-src
+          git -C ggml-src fetch --depth=1 https://github.com/ggml-org/llama.cpp.git 3cf03257f219afbe7334045ff7c6a06ac68c627d
+          git -C ggml-src checkout --detach FETCH_HEAD
+          test "$(git -C ggml-src rev-parse HEAD)" = 3cf03257f219afbe7334045ff7c6a06ac68c627d
+          curl --fail --location --retry 0 https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip --output metal-cpp_26.zip
+          echo '4df3c078b9aadcb516212e9cb03004cbc5ce9a3e9c068fa3144d021db585a3a4  metal-cpp_26.zip' | shasum -a 256 -c -
+          unzip -q metal-cpp_26.zip
+          { sw_vers; uname -m; xcodebuild -version; xcrun --sdk macosx --show-sdk-version; clang++ --version; cmake --version; } | tee validation-logs/environment.log
+      - name: Build complete Metal engine
+        run: |
+          set -euo pipefail
+          export TMPDIR="$GITHUB_WORKSPACE/tmp"
+          export CLANG_MODULE_CACHE_PATH="$GITHUB_WORKSPACE/tmp/clang-modules"
+          cmake -S candidate/metal -B build-metal -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DMETAL_CPP_DIR="$GITHUB_WORKSPACE/metal-cpp" -DSTRATA_GGML_DIR="$GITHUB_WORKSPACE/ggml-src" 2>&1 | tee validation-logs/configure.log
+          cmake --build build-metal --target strata -j2 2>&1 | tee validation-logs/build.log
+      - name: Run host-only stream ownership regression
+        run: |
+          set -euo pipefail
+          export TMPDIR="$GITHUB_WORKSPACE/tmp"
+          clang++ -std=c++20 -O2 -UNDEBUG -pthread -Icandidate/metal/include/metal_compat -Icandidate/metal/include -Icandidate/include candidate/src/core/conversation_copy_lifetime_test.cpp -o lifetime-test 2>&1 | tee validation-logs/lifetime-build.log
+          ./lifetime-test 2>&1 | tee validation-logs/lifetime-run.log
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strata-pr-3625-metal-evidence
+          path: |
+            /Users/runner/work/Strata/Strata/validation-logs
+            /Users/runner/work/Strata/Strata/build-metal/compile_commands.json
+            /Users/runner/work/Strata/Strata/build-metal/CMakeCache.txt
